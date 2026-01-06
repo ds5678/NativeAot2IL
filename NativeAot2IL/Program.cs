@@ -11,7 +11,6 @@ internal static class Program
         ConsoleLogger.Initialize();
         LibLogger.Writer = new LibLogWriter();
         ConsoleLogger.ShowVerbose = LibLogger.ShowVerbose = true;
-        Logger.InfoNewline("Starting application...", "Main");
         
         if(args.Length == 0)
         {
@@ -19,24 +18,35 @@ internal static class Program
             return;
         }
         
+        using var totalExecutionScope = new TimingScope("Execution Finished");
+        
         var peFilePath = args[0];
         Logger.InfoNewline($"Processing PE file: {peFilePath}", "Main");
         
+        var scope = new TimingScope("Parsed PE file");
         var contents = File.ReadAllBytes(peFilePath);
         using var memStream = new MemoryStream(contents, 0, contents.Length, true, true);
         using var pe = new PE.PE(memStream);
+        scope.Dispose();
 
-        var searcher = new BinarySearcher(pe);
-        var headerAddr = searcher.FindRtrHeader();
+        ulong headerAddr;
 
-        var header = pe.ReadReadableAtVirtualAddress<ReadyToRunDirectory>(headerAddr);
-        Logger.InfoNewline($"Found ReadyToRun header at virtual address: 0x{headerAddr:X}", "Main");
-        
-        foreach (var headerSection in header.Sections!)
+        using (_ = new TimingScope("Found R2R Header"))
         {
-            Logger.InfoNewline($"Section: {headerSection.SectionType}, Start: 0x{headerSection.Start:x8}, End: 0x{headerSection.End:x8} (length 0x{(headerSection.End - headerSection.Start):x8}), Flags: {headerSection.Flags}", "Main");
+            var searcher = new BinarySearcher(pe);
+            headerAddr = searcher.FindRtrHeader();
         }
 
+        ReadyToRunDirectory header;
+        using (_ = new TimingScope("Parsed R2R Header"))
+        {
+            header = pe.ReadReadableAtVirtualAddress<ReadyToRunDirectory>(headerAddr);
+            
+            foreach (var headerSection in header.Sections!) 
+                Logger.InfoNewline($"Section: {headerSection.SectionType}, Start: 0x{headerSection.Start:x8}, End: 0x{headerSection.End:x8} (length 0x{(headerSection.End - headerSection.Start):x8}), Flags: {headerSection.Flags}", "Main");
+        }
+
+        scope = new TimingScope("Located and parsed metadata header");
         var metadataSection = header.Sections.Single(s => s.SectionType == RtrSectionType.EmbeddedMetadata);
 
         var start = pe.MapVirtualAddressToRaw(metadataSection.Start);
@@ -47,13 +57,17 @@ internal static class Program
         
         using var metadataStream = new MemoryStream(metadataBytes, 0, metadataBytes.Length, true, true);
         using var metadataReader = new ClassReadingBinaryReader(metadataStream);
-        
-        var metadataHeader = pe.ReadReadableAtVirtualAddress<MetadataHeader>(metadataSection.Start);
-        
-        foreach (var scopeDefinitionHandle in metadataHeader.ScopeDefinitionHandles)
+
+        var metadataHeader = metadataReader.ReadReadable<MetadataHeader>(0);
+        scope.Dispose();
+
+        using (_ = new TimingScope("Parsed all scopes"))
         {
-            var scopeDefinition = scopeDefinitionHandle.Resolve<ScopeDefinition>(metadataReader);
-            Logger.InfoNewline($"Scope Definition: {scopeDefinition}", "Main");
+            foreach (var scopeDefinitionHandle in metadataHeader.ScopeDefinitionHandles)
+            {
+                var scopeDefinition = scopeDefinitionHandle.Resolve<ScopeDefinition>(metadataReader);
+                Logger.InfoNewline($"Scope Definition: {scopeDefinition}", "Main");
+            }
         }
     }
 }
